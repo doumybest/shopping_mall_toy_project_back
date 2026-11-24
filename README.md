@@ -1,7 +1,4 @@
 # 소소마켓 백엔드
-
-> 日本語・JPY固定のストアです。以前追加した未使用カラムは **V4__yen_only_oracle.sql** で整理できます。[日本語の設定手順](docs/JAPANESE_SETUP.md)
-
 Java 21 · Spring Boot 4.1.2 · Spring Security · Spring Data JPA / Hibernate · Oracle.
 프론트엔드는 `../front`의 Vue 3 앱이며 `/api` 요청을 8080으로 전달합니다.
 

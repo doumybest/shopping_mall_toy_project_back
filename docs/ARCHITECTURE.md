@@ -1,7 +1,4 @@
 # 구현 구조 및 API
-
-> 사이트·API 메시지·인증 메일은 일본어이며 모든 금액은 JPY 고정입니다. 별도의 통화 선택이나 통화 식별 필드는 사용하지 않습니다. [일본어/JPY 설정 안내](JAPANESE_SETUP.md)
-
 백엔드 데이터 접근은 Spring Data JPA입니다. Entity 11개와 JpaRepository 11개를 도메인별 패키지에 배치합니다. Service에는 SQL 대신 업무 규칙·트랜잭션·Entity 변경을 두고, API는 DTO로 반환합니다. [JPA 구현 안내](JPA_STRUCTURE.md)
 
 ## 프론트엔드 / 백엔드 / DB 책임
