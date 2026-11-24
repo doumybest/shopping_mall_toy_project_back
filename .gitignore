@@ -1,0 +1,20 @@
+# IntelliJ
+.idea/
+*.iml
+
+# Build
+build/
+target/
+.gradle/
+
+# Environment
+.env
+application-local.yml
+application-local.properties
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,11 @@
+# Oracle 없이 UI를 확인하는 로컬 전용 프로필. 파일 DB이므로 재시작해도 보존됩니다.
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/mall;MODE=Oracle;DATABASE_TO_LOWER=TRUE
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema-h2.sql
