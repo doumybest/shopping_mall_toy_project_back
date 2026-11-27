@@ -41,6 +41,9 @@
    | [V2__email_verification_oracle.sql](src/main/resources/db/migrations/V2__email_verification_oracle.sql) | メール認証と送信制限のテーブル、会員のメール認証日時列を追加します。 |
    | [V3__japanese_store_oracle.sql](src/main/resources/db/migrations/V3__japanese_store_oracle.sql) | 旧初期データに一致する管理者表示名とサンプル商品を日本語表記に更新します。 |
    | [V4__yen_only_oracle.sql](src/main/resources/db/migrations/V4__yen_only_oracle.sql) | 日本円固定に伴い通貨識別列を削除します。スクリプトは `MALL`／`FREEPDB1` への接続と既存データの条件を確認します。金額の換算は行いません。 |
+   | [V5__events_shipping_oracle.sql](src/main/resources/db/migrations/V5__events_shipping_oracle.sql) | 配送ステータス、イベント、会員クーポンを追加します。既存注文は発送準備中、クーポン割引なしで初期化されます。 |
+
+既存環境でイベント画像を使用するには、V5 の適用後に [V6__event_images_oracle.sql](src/main/resources/db/migrations/V6__event_images_oracle.sql) を一度実行します。イベント削除には、続けて [V7__event_deletion_oracle.sql](src/main/resources/db/migrations/V7__event_deletion_oracle.sql) を適用します。
 
 Oracle モードでは SQL の自動初期化を無効にしています。起動時に Hibernate の `ddl-auto=validate` がエンティティとスキーマの整合性を検証します。JPA への移行自体に追加 SQL は不要です。H2 デモでは起動時に `schema-h2.sql` を実行します。
 
@@ -133,7 +136,8 @@ back/
     │   │   ├── auth/                        会員、認証、権限、メール認証
     │   │   ├── product/                     商品の公開参照と管理者の更新操作
     │   │   ├── cart/                        カートとお気に入り
-    │   │   ├── order/                       注文、決済、在庫、ポイント、取消
+    │   │   ├── order/                       注文、配送ステータス、決済、在庫、ポイント、取消
+    │   │   ├── event/                       イベントと会員クーポン
     │   │   ├── review/                      購入者レビュー
     │   │   ├── health/                      稼働確認 API
     │   │   └── common/                      共通エンティティ、エラー応答、初期データ、日本語設定
@@ -151,7 +155,7 @@ back/
         └── resources/application-test.yml  H2 インメモリ DB の設定
 ```
 
-HTTP リクエストは Controller が受け取り、Service が業務ルールとトランザクションを管理します。Repository は JPA エンティティを介して DB にアクセスします。11個のテーブルをエンティティと `JpaRepository` に対応させています。API の入出力には DTO を使います。たとえば `ProductEntity` は DB マッピング用、`Product` レコードは商品 API の応答用です。本体の DB アクセスは Repository が担当し、テストの `JdbcTemplate` は DB の結果確認や障害の再現に利用します。 [JPA 実装の詳細](docs/JPA_STRUCTURE.md)・[API とデータベースの構成](docs/ARCHITECTURE.md)
+HTTP リクエストは Controller が受け取り、Service が業務ルールとトランザクションを管理します。Repository は JPA エンティティを介して DB にアクセスします。11個のテーブルをエンティティと `JpaRepository` に対応させています。API の入出力には DTO を使います。たとえば `ProductEntity` は DB マッピング用、`Product` レコードは商品 API の応答用です。イベントとクーポンの DB アクセスには `JdbcTemplate` を使います。テストでも DB の結果確認や障害の再現に利用します。 [JPA 実装の詳細](docs/JPA_STRUCTURE.md)・[API とデータベースの構成](docs/ARCHITECTURE.md)
 
 ## データベース構成
 
@@ -161,7 +165,9 @@ HTTP リクエストは Controller が受け取り、Service が業務ルール�
 | `mall_products` | 商品名、カテゴリー、円価格、在庫、販売状態と画像情報。価格と在庫に範囲制約があります。 |
 | `mall_cart` | 会員と商品を複合主キーとするカート明細。数量は1〜99です。 |
 | `mall_wishlist` | 会員と商品を複合主キーとするお気に入り。 |
-| `mall_orders` | 会員、配送先、注文状態、金額、ポイント、リクエストキー。キーは会員ごとに一意で、商品合計は利用ポイントと支払額の合計に一致します。 |
+| `mall_events` | バナーのタイトルと説明、掲載期間（JST）、公開設定、クーポンの割引額（円）。 |
+| `mall_event_coupons` | 会員とイベントの組み合わせごとに1件。受取時の割引額を保持します。 |
+| `mall_orders` | 会員、配送先、注文・配送状態、金額、ポイント、クーポン、リクエストキー。キーは会員ごとに一意で、商品合計はクーポン割引・利用ポイント・支払額の合計に一致します。 |
 | `mall_order_items` | 注文ごとの商品、注文時の商品名、単価、数量。 |
 | `mall_payments` | 模擬決済・返金の種別、金額、参照番号。注文ごとに決済と返金をそれぞれ1件まで記録できます。 |
 | `mall_point_ledger` | 注文に伴うポイントの利用・付与・返還・回収と、処理後の残高。 |
@@ -175,7 +181,7 @@ Oracle のデータを確認する場合は、SQL Developer で `mall` ユーザ
 
 ```sql
 SELECT id, name, price, stock, active FROM mall_products ORDER BY id;
-SELECT id, member_id, status, subtotal, points_used, amount_paid
+SELECT id, member_id, status, shipping_status, subtotal, coupon_discount, points_used, amount_paid
 FROM mall_orders ORDER BY id DESC;
 SELECT order_id, kind, amount, balance_after
 FROM mall_point_ledger ORDER BY id DESC;
@@ -191,8 +197,10 @@ FROM mall_point_ledger ORDER BY id DESC;
 | カートとお気に入り | 会員ごとに DB に保存します。カートでは商品を追加し、商品ごとの数量を指定し、削除できます。お気に入りは一覧、追加、解除に対応します。 |
 | 注文と模擬決済 | 受取人・電話番号・配送先を入力し、カート全体を注文します。送料は無料です。決済時点の価格と在庫をサーバーで確認し、`MOCK_CARD` または `MOCK_PAY` で模擬決済を記録します。注文時の商品名と単価を明細に保存します。 |
 | 二重注文と在庫の保護 | 同じ会員が同じ `requestKey` と注文内容で再送すると、既存の注文を返します。同じキーで内容が異なる場合は HTTP 409 を返します。会員と商品に行ロックをかけ、在庫更新、決済記録、注文保存、ポイント更新、カートの消去を同一トランザクションで実行します。 |
-| ポイント | 金額は整数の日本円（JPY）で、1ポイントは1円です。利用上限は利用できる正の残高と商品合計の小さい方です。ポイント利用後の模擬決済額の1%を、小数点以下切り捨てで付与します。利用・付与・取消時の精算は履歴に記録します。 |
-| 注文履歴と全体取消 | 会員は自分の注文一覧と明細を参照できます。注文全体を取り消すと、在庫を戻し、模擬返金を記録し、利用ポイントを返還して付与ポイントを取り消します。付与ポイントをすでに使っている場合、残高がマイナスになることがあります。以後の付与で相殺され、正の残高を利用できます。 |
+| ポイント | 金額は整数の日本円（JPY）で、1ポイントは1円です。利用上限は利用できる正の残高とクーポン割引後の商品合計の小さい方です。クーポンとポイント適用後の模擬決済額の1%を、小数点以下切り捨てで付与します。利用・付与・取消時の精算は履歴に記録します。 |
+| 注文履歴と全体取消 | 会員は自分の注文一覧と明細を参照できます。発送前に注文全体を取り消すと、在庫を戻し、模擬返金を記録し、利用ポイントを返還して付与ポイントを取り消します。付与ポイントをすでに使っている場合、残高がマイナスになることがあります。以後の付与で相殺され、正の残高を利用できます。 |
+| 配送ステータス | 管理者が `PREPARING`（発送準備中）→ `SHIPPED`（発送済み）→ `DELIVERED`（配達完了）の順に更新します。会員は自分の注文履歴と詳細で確認できます。 |
+| イベントとクーポン | 管理者が掲載期間（JST）と公開設定を管理します。開催中の公開イベントは誰でも閲覧でき、会員はイベントごとに1回クーポンを受け取れます。注文につき1枚を適用でき、割引上限は商品合計です。発送前に注文を取り消すと、イベント終了前であればクーポンを再利用できます。 |
 | 商品レビュー | レビュー一覧は公開されます。購入済みの商品に、会員1人につき1件のレビューを投稿できます。評価は1〜5、本文は1,000文字以内です。投稿者は自分のレビューを削除でき、投稿後に注文を取り消しても既存のレビューは残ります。 |
 | 日本語と稼働確認 | 初期商品、入力検証メッセージ、API の代表的なエラー応答を日本語で提供します。`/api/health` でアプリの稼働状態と模擬決済モードを確認できます。 |
 
@@ -209,13 +217,21 @@ FROM mall_point_ledger ORDER BY id DESC;
 | GET / PUT / DELETE | `/api/cart`（GET・PUT）、`/api/cart/{productId}`（DELETE） | 自分のカートの参照・数量設定・削除 |
 | GET / PUT / DELETE | `/api/wishlist`（GET）、`/api/wishlist/{productId}`（PUT・DELETE） | 自分のお気に入りの参照・追加・解除 |
 | GET | `/api/orders`、`/api/orders/{orderId}`、`/api/points` | 自分の注文一覧・注文詳細・ポイント履歴 |
-| POST | `/api/orders/checkout`、`/api/orders/{orderId}/cancel` | 注文確定と全体取消 |
+| POST | `/api/orders/checkout`、`/api/orders/{orderId}/cancel` | 注文確定（任意の `couponEventId` を指定）と発送前の全体取消 |
+| GET | `/api/events` | 開催中かつ公開設定が有効なバナーの公開取得。ID、タイトル、説明、終了日時、割引額、画像の有無を返します |
+| GET | `/api/events/{id}`、`/api/events/{id}/image` | 開催中の公開イベントの詳細と画像。未公開・期間外のイベントは `404` |
+| POST | `/api/events/{id}/coupon` | ログイン中の会員によるクーポン受取。受取済みは `409` |
+| GET | `/api/coupons` | ログイン中の会員が利用できるクーポン一覧 |
+| GET | `/api/coupons/claimed-events` | 利用済みを含む、ログイン中の会員が受け取ったイベント ID の一覧 |
+| GET / POST / PUT / DELETE | `/api/admin/events`（GET・POST）、`/api/admin/events/{id}`（PUT・DELETE） | 管理者によるイベント一覧・登録・更新。`imageData` に JPEG・PNG・WebP のデータ URL を指定できます（512 KB まで）。未指定は画像を維持し、空文字で画像を取り除きます。削除すると一覧と公開ページから消え、発行済みのクーポンと注文履歴は保持されます |
+| GET | `/api/admin/orders?page=0` | 管理者向けの配送管理一覧。1ページ30件。ページ番号は0から始まります |
+| PUT | `/api/admin/orders/{orderId}/shipping` | 管理者による配送ステータス更新。JSON の `shippingStatus` を指定します |
 | GET / POST / DELETE | `/api/products/{productId}/reviews`（GET・POST）、`/api/reviews/{reviewId}`（DELETE） | レビューの閲覧・投稿・削除 |
 
 API を直接呼び出す場合は、`GET /api/auth/csrf` が返す `headerName` と `token` を変更リクエストのヘッダーに設定し、同じセッションの Cookie を送信します。ログインは `application/x-www-form-urlencoded` で `email` と `password` を送信します。会員登録や注文など、リクエスト本文を受け取る他の API では JSON を使用します。ログインやログアウト後は CSRF トークンを取得し直します。
 
 ## テストと現在の提供範囲
 
-`mvn test` では、H2 の Oracle 互換モードを使い、会員権限と CSRF、メール認証、二重注文、同時注文時の在庫、トランザクションのロールバック、ポイント精算、レビュー権限などを確認します。メール送信のテストはローカル SMTP サーバーを使用します。実際の Oracle への接続や Gmail での受信は、それぞれの環境で別途確認してください。
+`mvn test` では、H2 の Oracle 互換モードを使い、会員権限と CSRF、メール認証、二重注文、同時注文時の在庫、トランザクションのロールバック、ポイント精算、レビュー権限、公開バナーの取得、クーポンの受取と注文への適用、配送ステータスの更新などを確認します。メール送信のテストはローカル SMTP サーバーを使用します。実際の Oracle への接続や Gmail での受信は、それぞれの環境で別途確認してください。
 
-現行版はローカル学習用の MVP です。大規模な一覧のページング、パスワード再設定、ログイン試行回数の制限、配送業務、注文の一部取消、画像アップロード、外部決済の承認・Webhook・返金照合は未実装です。公開環境に配置する場合は、HTTPS、`COOKIE_SECURE=true`、同一オリジンの `/api` プロキシ、データベースや SMTP の認証情報の管理が必要です。
+現行版はローカル学習用の MVP です。大規模な一覧のページング、パスワード再設定、ログイン試行回数の制限、配送業者との連携、注文の一部取消、画像アップロード、外部決済の承認・Webhook・返金照合は未実装です。公開環境に配置する場合は、HTTPS、`COOKIE_SECURE=true`、同一オリジンの `/api` プロキシ、データベースや SMTP の認証情報の管理が必要です。

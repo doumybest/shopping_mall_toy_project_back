@@ -16,5 +16,12 @@ public class OrderController {
     @GetMapping("/api/orders/{orderId}") OrderService.Order detail(Authentication auth,@PathVariable long orderId) { return orders.detail(id(auth),orderId); }
     @PostMapping("/api/orders/checkout") OrderService.Order checkout(Authentication auth,@Valid @RequestBody OrderService.Checkout body) { return orders.checkout(id(auth),body); }
     @PostMapping("/api/orders/{orderId}/cancel") OrderService.Order cancel(Authentication auth,@PathVariable long orderId) { return orders.cancel(id(auth),orderId); }
+    record ShippingUpdate(@jakarta.validation.constraints.NotNull OrderEntity.ShippingStatus shippingStatus) {}
+    @GetMapping("/api/admin/orders")
+    OrderService.ShipmentPage shipments(@RequestParam(defaultValue = "0") int page) { return orders.shipments(page); }
+    @PutMapping("/api/admin/orders/{orderId}/shipping")
+    OrderService.Shipment shipping(@PathVariable long orderId, @Valid @RequestBody ShippingUpdate body) {
+        return orders.updateShipment(orderId, body.shippingStatus());
+    }
     @GetMapping("/api/points") List<OrderService.PointEntry> points(Authentication auth) { return orders.points(id(auth)); }
 }

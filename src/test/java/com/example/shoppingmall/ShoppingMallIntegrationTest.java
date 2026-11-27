@@ -41,6 +41,80 @@ class ShoppingMallIntegrationTest {
     Product product(long price,int stock) { return products.create(new ProductService.Edit("테스트 商品","暮らし・雑貨",price,"商品説明","☕","",stock)); }
     OrderService.Checkout checkout(long points) { return new OrderService.Checkout(UUID.randomUUID().toString(),points,"테스터","010-1234-5678","東京都渋谷区神宮前1-2-3","MOCK_CARD"); }
 
+    @Test void memberCouponAndShippingFlowUsesOrderTotalsAndEnforcesRoles() throws Exception {
+        var member = member();
+        var memberBrowser = new Browser();
+        var admin = new Browser();
+        var guest = new Browser();
+        guest.csrf();
+        assertThat(guest.send("GET", "/api/admin/events", null, false).statusCode()).isEqualTo(401);
+        memberBrowser.csrf();
+        assertThat(memberBrowser.login(member.email(), PASSWORD).statusCode()).isEqualTo(200);
+        memberBrowser.csrf();
+        admin.csrf();
+        assertThat(admin.login("admin@test.example", "TestAdmin!12345").statusCode()).isEqualTo(200);
+        admin.csrf();
+
+        var now = java.time.LocalDateTime.now(java.time.ZoneId.of("Asia/Tokyo"));
+        var title = "イベント " + UUID.randomUUID();
+        var event = new com.example.shoppingmall.event.EventService.EventInput(
+            title, "会員クーポン", now.minusHours(1), now.plusHours(1), 300, true);
+        assertThat(memberBrowser.send("POST", "/api/admin/events", event, true).statusCode()).isEqualTo(403);
+        assertThat(admin.send("POST", "/api/admin/events", event, false).statusCode()).isEqualTo(403);
+        assertThat(admin.send("POST", "/api/admin/events", event, true).statusCode()).isEqualTo(204);
+        var hiddenTitle = "非公開 " + UUID.randomUUID();
+        var hidden = new com.example.shoppingmall.event.EventService.EventInput(
+            hiddenTitle, "非公開", now.minusHours(1), now.plusHours(1), 300, false);
+        assertThat(admin.send("POST", "/api/admin/events", hidden, true).statusCode()).isEqualTo(204);
+        var response = guest.send("GET", "/api/events", null, false);
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).contains(title).doesNotContain(hiddenTitle, "\"startsAt\"", "\"enabled\"");
+        long eventId = jdbc.queryForObject("SELECT id FROM mall_events WHERE title = ?", Long.class, title);
+        var claim = "/api/events/" + eventId + "/coupon";
+        assertThat(guest.send("POST", claim, null, true).statusCode()).isEqualTo(401);
+        assertThat(memberBrowser.send("POST", claim, null, true).statusCode()).isEqualTo(204);
+        assertThat(memberBrowser.send("POST", claim, null, true).statusCode()).isEqualTo(409);
+        assertThat(memberBrowser.send("GET", "/api/coupons/claimed-events", null, false).body()).isEqualTo("[" + eventId + "]");
+        assertThat(guest.send("GET", "/api/coupons/claimed-events", null, false).statusCode()).isEqualTo(401);
+        assertThat(guest.send("GET", "/api/events/" + eventId, null, false).statusCode()).isEqualTo(200);
+        assertThat(guest.send("GET", "/api/events/" + eventId + "/image", null, false).statusCode()).isEqualTo(404);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM mall_event_coupons WHERE event_id = ?", Integer.class, eventId)).isEqualTo(1);
+
+        var product = product(1000, 3);
+        carts.put(member.id(), new CartService.Change(product.id(), 1));
+        var body = new OrderService.Checkout(UUID.randomUUID().toString(), 0,
+            "テスター", "010-1234-5678", "東京都渋谷区神宮前1-2-3", "MOCK_CARD", eventId);
+        var order = orders.checkout(member.id(), body);
+        assertThat(order.couponDiscount()).isEqualTo(300);
+        assertThat(order.amountPaid()).isEqualTo(700);
+        assertThat(order.pointsEarned()).isEqualTo(7);
+        assertThat(orders.checkout(member.id(), body).id()).isEqualTo(order.id());
+        assertThat(memberBrowser.send("GET", "/api/coupons", null, false).body()).isEqualTo("[]");
+        orders.cancel(member.id(), order.id());
+        assertThat(memberBrowser.send("GET", "/api/coupons", null, false).body()).contains(title);
+        String eventPath = "/api/admin/events/" + eventId;
+        assertThat(memberBrowser.send("DELETE", eventPath, null, true).statusCode()).isEqualTo(403);
+        assertThat(admin.send("DELETE", eventPath, null, false).statusCode()).isEqualTo(403);
+        assertThat(admin.send("DELETE", eventPath, null, true).statusCode()).isEqualTo(204);
+        assertThat(guest.send("GET", "/api/events/" + eventId, null, false).statusCode()).isEqualTo(404);
+        assertThat(guest.send("GET", "/api/events", null, false).body()).doesNotContain(title);
+        assertThat(admin.send("GET", "/api/admin/events", null, false).body()).doesNotContain(title);
+        assertThat(admin.send("PUT", eventPath, event, true).statusCode()).isEqualTo(404);
+        assertThat(memberBrowser.send("GET", "/api/coupons", null, false).body()).contains(title);
+
+        carts.put(member.id(), new CartService.Change(product.id(), 1));
+        var second = orders.checkout(member.id(), new OrderService.Checkout(UUID.randomUUID().toString(), 0,
+            body.recipient(), body.phone(), body.address(), body.paymentMethod(), eventId));
+        var shipping = "/api/admin/orders/" + second.id() + "/shipping";
+        assertThat(memberBrowser.send("PUT", shipping, Map.of("shippingStatus", "SHIPPED"), true).statusCode()).isEqualTo(403);
+        assertThat(admin.send("GET", "/api/admin/orders", null, false).statusCode()).isEqualTo(200);
+        assertThat(admin.send("PUT", shipping, Map.of("shippingStatus", "DELIVERED"), true).statusCode()).isEqualTo(409);
+        assertThat(admin.send("PUT", shipping, Map.of("shippingStatus", "SHIPPED"), true).statusCode()).isEqualTo(200);
+        assertThat(memberBrowser.send("GET", "/api/orders/" + second.id(), null, false).body()).contains("SHIPPED");
+        assertThat(memberBrowser.send("POST", "/api/orders/" + second.id() + "/cancel", null, true).statusCode()).isEqualTo(409);
+        assertThat(admin.send("PUT", shipping, Map.of("shippingStatus", "DELIVERED"), true).statusCode()).isEqualTo(200);
+    }
+
     @Test void purchasePersistsSnapshotPaymentStockAndPoints() {
         var member=member(); var product=product(18000,10);
         carts.put(member.id(),new CartService.Change(product.id(),2));

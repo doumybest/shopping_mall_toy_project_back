@@ -2,12 +2,15 @@ package com.example.shoppingmall.order;
 
 import com.example.shoppingmall.auth.*;
 import com.example.shoppingmall.cart.CartService;
+import com.example.shoppingmall.event.EventService;
+import com.example.shoppingmall.order.OrderEntity.ShippingStatus;
 import com.example.shoppingmall.product.*;
 import jakarta.validation.constraints.*;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 import org.springframework.http.HttpStatus;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -18,12 +21,17 @@ public class OrderService {
     public record Checkout(@NotBlank @Pattern(regexp="[A-Za-z0-9_-]{16,64}") String requestKey,
         @Min(0) @Max(1000000000) long pointsUsed,@NotBlank @Size(max=50) String recipient,
         @NotBlank @Pattern(regexp="[0-9+() -]{8,30}") String phone,@NotBlank @Size(min=5,max=300) String address,
-        @NotNull @Pattern(regexp="MOCK_CARD|MOCK_PAY") String paymentMethod) {
+        @NotNull @Pattern(regexp="MOCK_CARD|MOCK_PAY") String paymentMethod, @Positive Long couponEventId) {
+        public Checkout(String requestKey, long pointsUsed, String recipient, String phone, String address, String paymentMethod) {
+            this(requestKey, pointsUsed, recipient, phone, address, paymentMethod, null);
+        }
         public Checkout { if(phone!=null) phone=java.text.Normalizer.normalize(phone,java.text.Normalizer.Form.NFKC).trim(); }
     }
     public record Line(long productId,String name,long unitPrice,int quantity) {}
     public record Order(long id,String status,long subtotal,long pointsUsed,long amountPaid,long pointsEarned,
-        String recipient,String phone,String address,String paymentMethod,String createdAt,List<Line> items) {}
+        String recipient,String phone,String address,String paymentMethod,String createdAt,List<Line> items,
+        ShippingStatus shippingStatus,long couponDiscount) {}
+    public record Shipment(long id,String status,ShippingStatus shippingStatus,String createdAt) {}
     public record PointEntry(long id,long orderId,String kind,long amount,long balanceAfter,String createdAt) {}
 
     private final OrderRepository repository;
@@ -33,11 +41,12 @@ public class OrderService {
     private final MemberService members;
     private final ProductService products;
     private final CartService carts;
+    private final EventService events;
 
     public OrderService(OrderRepository repository,OrderItemRepository items,PaymentRepository payments,
-            PointLedgerRepository ledger,MemberService members,ProductService products,CartService carts) {
+            PointLedgerRepository ledger,MemberService members,ProductService products,CartService carts,EventService events) {
         this.repository=repository;this.items=items;this.payments=payments;this.ledger=ledger;
-        this.members=members;this.products=products;this.carts=carts;
+        this.members=members;this.products=products;this.carts=carts;this.events=events;
     }
     private OrderEntity owned(long memberId,long id) {
         return repository.findByIdAndMember_Id(id,memberId)
@@ -62,7 +71,7 @@ public class OrderService {
         Optional<OrderEntity> existing=repository.findByMember_IdAndRequestKey(memberId,body.requestKey());
         if(existing.isPresent()) {
             OrderEntity old=existing.get();
-            if(old.getPointsUsed()!=body.pointsUsed() || !old.getRecipient().equals(body.recipient().trim()) ||
+            if(!Objects.equals(old.getCouponEventId(),body.couponEventId()) || old.getPointsUsed()!=body.pointsUsed() || !old.getRecipient().equals(body.recipient().trim()) ||
                 !old.getPhone().equals(body.phone()) || !old.getAddress().equals(body.address().trim()) || !old.getPaymentMethod().equals(body.paymentMethod()))
                 throw new ResponseStatusException(HttpStatus.CONFLICT,"同じ注文リクエストで内容を変更することはできません。");
             return view(old,lines(old.getId()));
@@ -80,12 +89,16 @@ public class OrderService {
             snapshots.add(new Line(product.getId(),product.getName(),product.getPrice(),item.quantity()));
             locked.add(product);
         }
-        if(body.pointsUsed()>Math.max(0,member.getPoints()) || body.pointsUsed()>subtotal)
+        long discount = body.couponEventId() == null ? 0 : Math.min(subtotal, events.discount(memberId, body.couponEventId()));
+        if (body.couponEventId() != null && discount == 0)
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"この注文にはクーポンを利用できません。");
+        if(body.pointsUsed()>Math.max(0,member.getPoints()) || body.pointsUsed()>subtotal-discount)
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"利用可能なポイントまたは商品金額を超えています。");
-        long paid=subtotal-body.pointsUsed();
+        long paid=subtotal-discount-body.pointsUsed();
         long earned=paid/100;
         OrderEntity order=new OrderEntity();
         order.setMember(member);order.setRequestKey(body.requestKey());order.setStatus("PAID");
+        order.setCouponEventId(body.couponEventId());order.setCouponDiscount(discount);
         order.setSubtotal(subtotal);order.setPointsUsed(body.pointsUsed());order.setAmountPaid(paid);order.setPointsEarned(earned);
         order.setRecipient(body.recipient().trim());order.setPhone(body.phone());order.setAddress(body.address().trim());order.setPaymentMethod(body.paymentMethod());
         repository.saveAndFlush(order);
@@ -112,6 +125,8 @@ public class OrderService {
         OrderEntity order=owned(memberId,id);
         List<Line> snapshots=lines(id);
         if(order.getStatus().equals("CANCELLED")) return view(order,snapshots);
+        if (order.getShippingStatus() != ShippingStatus.PREPARING)
+            throw new ResponseStatusException(HttpStatus.CONFLICT,"発送後の注文はキャンセルできません。");
         for(Line line:snapshots) {
             ProductEntity product=products.lockEntity(line.productId());
             product.setStock(product.getStock()+line.quantity());
@@ -125,6 +140,32 @@ public class OrderService {
         member.setPoints(balance);
         return view(order,snapshots);
     }
+    public record ShipmentPage(List<Shipment> orders, boolean hasNext) {}
+
+    public ShipmentPage shipments(int page) {
+        if (page < 0) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"ページ番号が正しくありません。");
+        var slice = repository.findAllByOrderByIdDesc(PageRequest.of(page, 30));
+        return new ShipmentPage(slice.map(OrderService::shipment).getContent(), slice.hasNext());
+    }
+
+    @Transactional
+    public Shipment updateShipment(long id, ShippingStatus next) {
+        long memberId = repository.findMemberId(id).orElseThrow(() ->
+            new ResponseStatusException(HttpStatus.NOT_FOUND,"注文が見つかりません。"));
+        members.lockEntity(memberId);
+        OrderEntity order = owned(memberId,id);
+        ShippingStatus current = order.getShippingStatus();
+        if (!order.getStatus().equals("PAID") || (next != current && next.ordinal() != current.ordinal() + 1)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,"配送状況を変更できません。");
+        }
+        order.setShippingStatus(next);
+        return shipment(order);
+    }
+
+    private static Shipment shipment(OrderEntity order) {
+        return new Shipment(order.getId(),order.getStatus(),order.getShippingStatus(),order.getCreatedAt().toString());
+    }
+
     private void payment(OrderEntity order,String kind,long amount,String reference) {
         PaymentEntity payment=new PaymentEntity();
         payment.setOrder(order);payment.setProvider("MOCK");payment.setKind(kind);payment.setAmount(amount);payment.setReferenceCode(reference);
@@ -141,6 +182,6 @@ public class OrderService {
     }
     private static Order view(OrderEntity order,List<Line> lines) {
         return new Order(order.getId(),order.getStatus(),order.getSubtotal(),order.getPointsUsed(),order.getAmountPaid(),
-            order.getPointsEarned(),order.getRecipient(),order.getPhone(),order.getAddress(),order.getPaymentMethod(),order.getCreatedAt().toString(),lines);
+            order.getPointsEarned(),order.getRecipient(),order.getPhone(),order.getAddress(),order.getPaymentMethod(),order.getCreatedAt().toString(),lines,order.getShippingStatus(),order.getCouponDiscount());
     }
 }

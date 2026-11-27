@@ -51,6 +51,27 @@ public class OrderEntity extends BaseEntity {
     @Column(name="cancelled_at")
     private LocalDateTime cancelledAt;
 
+    @Column(name="shipping_status", length=20, nullable=false)
+    @Enumerated(EnumType.STRING)
+    @JdbcTypeCode(SqlTypes.VARCHAR)
+    private ShippingStatus shippingStatus = ShippingStatus.PREPARING;
+
+    @JdbcTypeCode(SqlTypes.NUMERIC)
+    @Column(name="coupon_event_id", precision=19, scale=0)
+    private Long couponEventId;
+
+    @JdbcTypeCode(SqlTypes.NUMERIC)
+    @Column(name="coupon_discount", nullable=false, precision=19, scale=0)
+    private long couponDiscount;
+
+    public enum ShippingStatus { PREPARING, SHIPPED, DELIVERED }
+    public ShippingStatus getShippingStatus() { return shippingStatus; }
+    public void setShippingStatus(ShippingStatus shippingStatus) { this.shippingStatus = shippingStatus; }
+    public Long getCouponEventId() { return couponEventId; }
+    public void setCouponEventId(Long couponEventId) { this.couponEventId = couponEventId; }
+    public long getCouponDiscount() { return couponDiscount; }
+    public void setCouponDiscount(long couponDiscount) { this.couponDiscount = couponDiscount; }
+
     public OrderEntity() {}
 
     public MemberEntity getMember() { return member; }

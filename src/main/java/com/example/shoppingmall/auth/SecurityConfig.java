@@ -22,7 +22,7 @@ public class SecurityConfig {
         http.authorizeHttpRequests(auth -> auth
             .requestMatchers("/error", "/api/auth/csrf", "/api/auth/register", "/api/auth/login",
                 "/api/auth/email/send", "/api/auth/email/verify").permitAll()
-            .requestMatchers(HttpMethod.GET, "/api/products", "/api/products/*", "/api/products/*/reviews", "/api/health").permitAll()
+            .requestMatchers(HttpMethod.GET, "/api/products", "/api/products/*", "/api/products/*/reviews", "/api/events", "/api/events/{id:[0-9]+}", "/api/events/{id:[0-9]+}/image", "/api/health").permitAll()
             .requestMatchers("/api/admin/**").hasRole("ADMIN")
             .anyRequest().authenticated())
             .formLogin(form -> form.loginProcessingUrl("/api/auth/login").usernameParameter("email")
